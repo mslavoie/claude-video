@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 
 REQUIRED_BINARIES = ["ffmpeg", "ffprobe", "yt-dlp"]
@@ -49,8 +50,43 @@ OPENAI_API_KEY=
 """
 
 
+def _load_watch_config() -> tuple[dict, Any]:
+    """Lazily load config.py from the same scripts/ directory.
+
+    Returns (config_dict, save_config_fn). Falls back to empty dict + no-op
+    if config.py is missing or broken — setup.py must never fail due to config.
+    """
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "watch_config", Path(__file__).parent / "config.py"
+        )
+        if spec is None or spec.loader is None:
+            return {}, lambda x: None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        return mod.load_config(), mod.save_config
+    except Exception:
+        return {}, lambda x: None
+
+
 def _which(name: str) -> str | None:
-    return shutil.which(name)
+    found = shutil.which(name)
+    if found:
+        return found
+    # pip --user on Windows puts scripts in %APPDATA%\Python\PythonXY\Scripts,
+    # which is often missing from PATH. Try the module entrypoint as fallback.
+    if name == "yt-dlp":
+        try:
+            r = subprocess.run(
+                [sys.executable, "-m", "yt_dlp", "--version"],
+                capture_output=True, timeout=5,
+            )
+            if r.returncode == 0:
+                return f"{sys.executable} -m yt_dlp"
+        except Exception:
+            pass
+    return None
 
 
 def _check_binaries() -> list[str]:
@@ -210,6 +246,7 @@ def _status() -> dict:
     else:
         status = "needs_key"
 
+    cfg, _ = _load_watch_config()
     return {
         "status": status,
         "first_run": is_first_run(),
@@ -218,6 +255,10 @@ def _status() -> dict:
         "has_api_key": has_key,
         "config_file": str(CONFIG_FILE),
         "platform": platform.system(),
+        "report_dir": cfg.get("report_dir", ""),
+        "default_template": cfg.get("default_template", "video-analysis"),
+        "save_transcript": cfg.get("save_transcript", True),
+        "save_notable_frames": cfg.get("save_notable_frames", True),
     }
 
 
@@ -293,16 +334,28 @@ def cmd_install() -> int:
     else:
         print(f"[setup] config exists: {CONFIG_FILE}")
 
+    cfg, save_cfg = _load_watch_config()
+    cfg_json = Path.home() / ".config" / "watch" / "config.json"
+    if not cfg_json.exists():
+        try:
+            save_cfg({})  # writes defaults to config.json
+            print(f"[setup] created report config: {cfg_json}")
+            print(f"[setup] default report_dir: {cfg.get('report_dir', '~/Documents/video-notes')}")
+        except Exception as exc:
+            print(f"[setup] warning: could not create report config: {exc}", file=sys.stderr)
+
     has_key, backend = _have_api_key()
+    # Mark setup done once binaries are confirmed — key is optional, so don't
+    # block SETUP_COMPLETE on it (prevents wizard re-running every session).
+    _write_setup_complete()
     if has_key:
-        _write_setup_complete()
         print(f"[setup] ready. whisper backend: {backend}")
         if installed_deps:
             print("[setup] installed dependencies; /watch is fully set up.")
         return 0
 
     print("")
-    print("[setup] one step left: add a Whisper API key.")
+    print("[setup] one step left: add a Whisper API key (optional but recommended).")
     print("")
     print(f"  Edit {CONFIG_FILE} and set either:")
     print("    GROQ_API_KEY=...    (preferred — cheaper, faster; get one at console.groq.com/keys)")

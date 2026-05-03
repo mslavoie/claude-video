@@ -7,8 +7,9 @@ then Reads each frame path to see the video.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import sys
-import tempfile
 from pathlib import Path
 
 
@@ -19,6 +20,7 @@ from download import download, is_url  # noqa: E402
 from frames import MAX_FPS, auto_fps, auto_fps_focus, extract, format_time, get_metadata, parse_time  # noqa: E402
 from transcribe import filter_range, format_transcript, parse_vtt  # noqa: E402
 from whisper import load_api_key, transcribe_video  # noqa: E402
+from config import load_config  # noqa: E402
 
 
 def main() -> int:
@@ -44,65 +46,173 @@ def main() -> int:
         default=None,
         help="Force a specific Whisper backend. Default: prefer Groq, fall back to OpenAI.",
     )
+    ap.add_argument(
+        "--template",
+        type=str,
+        default=None,
+        help="Report template name (default: from config or video-analysis)",
+    )
+    ap.add_argument(
+        "--report-dir",
+        type=str,
+        default=None,
+        help="Directory to save the final report (default: from config)",
+    )
+    ap.add_argument(
+        "--no-save",
+        action="store_true",
+        help="Skip writing the report to disk. Display in Claude context only.",
+    )
+    ap.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help="Ignore cached frames and re-download + re-extract. Useful after video source changes.",
+    )
     args = ap.parse_args()
+
+    cfg = load_config()
+    report_dir = (
+        Path(args.report_dir).expanduser().resolve()
+        if args.report_dir
+        else Path(cfg["report_dir"]).expanduser().resolve()
+    )
+    template_name = args.template or cfg.get("default_template", "video-analysis")
+    save_report = not args.no_save
+    save_transcript = cfg.get("save_transcript", True)
+    save_notable_frames = cfg.get("save_notable_frames", True)
 
     max_frames = min(args.max_frames, 100)
 
+    # Resolve working directory — persistent hash-keyed cache by default.
     if args.out_dir:
         work = Path(args.out_dir).expanduser().resolve()
     else:
-        work = Path(tempfile.mkdtemp(prefix="watch-"))
+        cache_key = hashlib.md5(args.source.encode()).hexdigest()[:16]
+        cache_base = Path(cfg.get("work_cache_dir", str(Path.home() / ".cache" / "watch"))).expanduser().resolve()
+        work = cache_base / cache_key
     work.mkdir(parents=True, exist_ok=True)
     print(f"[watch] working dir: {work}", file=sys.stderr)
 
-    print(
-        "[watch] downloading via yt-dlp…" if is_url(args.source) else "[watch] using local file…",
-        file=sys.stderr,
-    )
-    dl = download(args.source, work / "download")
-    video_path = dl["video_path"]
-
-    meta = get_metadata(video_path)
-    full_duration = meta["duration_seconds"]
-
+    # Parse time range early — needed in both cache and fresh-download paths.
     start_sec = parse_time(args.start)
     end_sec = parse_time(args.end)
 
-    if start_sec is not None and start_sec < 0:
-        raise SystemExit("--start must be non-negative")
-    if end_sec is not None and start_sec is not None and end_sec <= start_sec:
-        raise SystemExit("--end must be greater than --start")
-    if full_duration > 0 and start_sec is not None and start_sec >= full_duration:
-        raise SystemExit(f"--start {start_sec:.1f}s is past end of video ({full_duration:.1f}s)")
+    # Check for a completed prior run. Skip download + re-extract when frames
+    # are already present and no range or force-refresh was requested.
+    state_file = work / "watch-state.json"
+    frames_dir_path = work / "frames"
+    cached_frames = sorted(frames_dir_path.glob("frame_*.jpg")) if frames_dir_path.exists() else []
+    use_cache = (
+        bool(cached_frames)
+        and state_file.exists()
+        and not args.force_refresh
+        and args.start is None
+        and args.end is None
+    )
 
-    effective_start = start_sec if start_sec is not None else 0.0
-    effective_end = end_sec if end_sec is not None else full_duration
-    effective_duration = max(0.0, effective_end - effective_start)
-    focused = start_sec is not None or end_sec is not None
+    if use_cache:
+        print("[watch] reusing cached frames from previous run (use --force-refresh to re-download)…", file=sys.stderr)
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+        except Exception:
+            state = {}
 
-    if focused:
-        fps, target = auto_fps_focus(effective_duration, max_frames=max_frames)
+        info = state.get("info", {"url": args.source})
+        meta = {
+            "duration_seconds": state.get("duration_seconds", 0.0),
+            "width": state.get("width"),
+            "height": state.get("height"),
+            "codec": state.get("codec"),
+            "has_audio": True,
+        }
+        full_duration = meta["duration_seconds"]
+        fps = state.get("fps", 1.0)
+        frames = [
+            {"index": i, "timestamp_seconds": round(i / fps if fps > 0 else 0.0, 2), "path": str(p)}
+            for i, p in enumerate(cached_frames)
+        ]
+        dl = {
+            "video_path": state.get("video_path", ""),
+            "subtitle_path": state.get("subtitle_path"),
+            "info": info,
+            "downloaded": False,
+        }
+        # In cache path start/end are always None, so these are always full-video.
+        focused = False
+        effective_start = 0.0
+        effective_end = full_duration
+        effective_duration = full_duration
+        target = len(frames)
+
     else:
-        fps, target = auto_fps(effective_duration, max_frames=max_frames)
-    if args.fps is not None:
-        fps = min(args.fps, MAX_FPS)
-        target = max(1, int(round(fps * effective_duration)))
+        print(
+            "[watch] downloading via yt-dlp…" if is_url(args.source) else "[watch] using local file…",
+            file=sys.stderr,
+        )
+        dl = download(args.source, work / "download")
+        video_path = dl["video_path"]
 
-    scope = (
-        f"{format_time(effective_start)}-{format_time(effective_end)} ({effective_duration:.1f}s)"
-        if focused else f"full {effective_duration:.1f}s"
-    )
-    print(f"[watch] extracting ~{target} frames at {fps:.3f} fps over {scope}…", file=sys.stderr)
+        meta = get_metadata(video_path)
+        full_duration = meta["duration_seconds"]
 
-    frames = extract(
-        video_path,
-        work / "frames",
-        fps=fps,
-        resolution=args.resolution,
-        max_frames=max_frames,
-        start_seconds=start_sec,
-        end_seconds=end_sec,
-    )
+        if start_sec is not None and start_sec < 0:
+            raise SystemExit("--start must be non-negative")
+        if end_sec is not None and start_sec is not None and end_sec <= start_sec:
+            raise SystemExit("--end must be greater than --start")
+        if full_duration > 0 and start_sec is not None and start_sec >= full_duration:
+            raise SystemExit(f"--start {start_sec:.1f}s is past end of video ({full_duration:.1f}s)")
+
+        effective_start = start_sec if start_sec is not None else 0.0
+        effective_end = end_sec if end_sec is not None else full_duration
+        effective_duration = max(0.0, effective_end - effective_start)
+        focused = start_sec is not None or end_sec is not None
+
+        if focused:
+            fps, target = auto_fps_focus(effective_duration, max_frames=max_frames)
+        else:
+            fps, target = auto_fps(effective_duration, max_frames=max_frames)
+        if args.fps is not None:
+            fps = min(args.fps, MAX_FPS)
+            target = max(1, int(round(fps * effective_duration)))
+
+        scope = (
+            f"{format_time(effective_start)}-{format_time(effective_end)} ({effective_duration:.1f}s)"
+            if focused else f"full {effective_duration:.1f}s"
+        )
+        print(f"[watch] extracting ~{target} frames at {fps:.3f} fps over {scope}…", file=sys.stderr)
+
+        frames = extract(
+            video_path,
+            work / "frames",
+            fps=fps,
+            resolution=args.resolution,
+            max_frames=max_frames,
+            start_seconds=start_sec,
+            end_seconds=end_sec,
+        )
+
+        # Persist state so subsequent calls can skip download + extraction.
+        try:
+            state_file.write_text(
+                json.dumps(
+                    {
+                        "video_path": str(video_path),
+                        "subtitle_path": str(dl["subtitle_path"]) if dl.get("subtitle_path") else None,
+                        "info": dl.get("info") or {},
+                        "duration_seconds": full_duration,
+                        "width": meta.get("width"),
+                        "height": meta.get("height"),
+                        "codec": meta.get("codec"),
+                        "fps": fps,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            print(f"[watch] warning: could not write state file: {exc}", file=sys.stderr)
 
     transcript_segments: list[dict] = []
     transcript_text: str | None = None
@@ -119,9 +229,10 @@ def main() -> int:
     if not transcript_segments and not args.no_whisper:
         backend, api_key = load_api_key(args.whisper)
         if backend and api_key:
+            video_path_for_whisper = dl.get("video_path", "")
             try:
                 all_segments, used_backend = transcribe_video(
-                    video_path,
+                    video_path_for_whisper,
                     work / "audio.mp3",
                     backend=backend,
                     api_key=api_key,
@@ -221,7 +332,15 @@ def main() -> int:
 
     print()
     print("---")
-    print(f"_Work dir: `{work}` — delete when done._")
+    print(f"_Work dir: `{work}` — delete when done if not saving._")
+    print()
+    print("## Watch Config")
+    print()
+    print(f"- **report_dir:** `{report_dir}`")
+    print(f"- **template:** `{template_name}`")
+    print(f"- **save_report:** {str(save_report).lower()}")
+    print(f"- **save_transcript:** {str(save_transcript).lower()}")
+    print(f"- **save_notable_frames:** {str(save_notable_frames).lower()}")
 
     return 0
 

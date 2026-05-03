@@ -17,6 +17,8 @@ git clone https://github.com/bradautomates/claude-video.git ~/.codex/skills/watc
 
 Zero config to start — `yt-dlp` and `ffmpeg` install on first run via `brew` on macOS (Linux/Windows print exact commands). Captions cover most public videos for free. Whisper API key is only needed when a video has no captions.
 
+After the first run, frames are cached locally — re-opening a session on the same video skips the download and re-extraction entirely. The full analysis pipeline produces a structured 14-section Obsidian note with hype detection, novelty scoring, competitive intelligence, and implementation playbooks, saved directly to your vault with embedded notable frames.
+
 ---
 
 Claude can read a webpage, run a script, browse a repo. What it can't do, out of the box, is *watch a video*. You paste a YouTube link and it has to either guess from the title or pull a transcript that's missing 90% of what's on screen.
@@ -150,7 +152,73 @@ Other knobs (passed to `scripts/watch.py`):
 - `--fps F` — override the auto-fps calculation (still capped at 2 fps).
 - `--whisper groq|openai` — force a specific Whisper backend.
 - `--no-whisper` — disable transcription entirely; frames only.
-- `--out-dir DIR` — keep working files somewhere specific (default: auto-generated tmp dir).
+- `--out-dir DIR` — keep working files somewhere specific (default: persistent cache dir).
+- `--force-refresh` — ignore the cache and re-download + re-extract from scratch.
+
+## Persistent frame cache
+
+After the first run, frames are cached at `~/.cache/watch/<url-hash>/` alongside a `watch-state.json` sentinel. On every subsequent call — including across Claude Code sessions — the script detects the cache and skips download and re-extraction automatically.
+
+```
+/watch https://youtu.be/abc                 # first run — downloads + extracts
+/watch https://youtu.be/abc                 # second run — instant, uses cache
+/watch https://youtu.be/abc --force-refresh # bypass cache, re-download
+```
+
+The cache is keyed by the exact source string (URL or path). Passing `--start` / `--end` bypasses the cache because frame timestamps change. `--out-dir` also bypasses the cache, using the specified directory instead.
+
+To clear all cached videos: `rm -rf ~/.cache/watch/` (macOS/Linux) or `Remove-Item -Recurse -Force "$env:USERPROFILE\.cache\watch"` (Windows).
+
+## Analytical reports
+
+The default `video-analysis` template produces a 14-section structured note:
+
+| Section | What it covers |
+|---------|---------------|
+| Visual Evidence | Notable frames embedded with timestamps |
+| 1. Executive Synthesis | Core thesis, why it matters now, non-obvious insight |
+| 2. Signal / Noise Audit | Hype detection, claim-to-evidence ratio, verdict |
+| 3. What's Actually Novel | Genuinely new vs. reframed vs. recycled |
+| 4. High-Signal Summary | Main arguments, key examples, chronological breakdown |
+| 5. Concept Extraction | Frameworks and models extracted into a table |
+| 6. Limitations & Attack Surface | Unstated assumptions, failure cases, steelman |
+| 7. Competitive Intelligence | Vendor mentions, positioning language, market signals |
+| 8. Implementation Playbooks | Step-by-step how-tos for actionable techniques |
+| 9–11. Cross-Domain Transfer | Consulting, technology/AI, personal, systemic lenses |
+| 12. Action & Experiments | Hypothesis-driven experiment table |
+| 13. Tools & Resources | Everything mentioned, with context |
+| 14. Meta-Reflection | What changed, what's confirmatory, what to delete |
+
+The Signal/Noise verdict is always one of: `Worth taking seriously` / `Read critically` / `Marketing content` / `Pure hype`.
+
+## Obsidian integration
+
+Reports are saved to your Obsidian vault by default. The `report_dir` config key points to the destination (defaults to `~/OneDrive - L55 Conseils inc/ML Obsidian Vault/01 - Source Material` on L55 setups, or `~/Documents/video-notes` elsewhere).
+
+Notable frames are copied to `{report_dir}/assets/` and embedded inline. The embedding format respects your vault's wikilink setting:
+
+- **`obsidian_wikilinks: true`** (default) — `![[assets/slug-frame-MMSS.jpg]]`
+- **`obsidian_wikilinks: false`** — `![caption](assets/slug-frame-MMSS.jpg)`
+
+Configure via `~/.config/watch/config.json`:
+
+```json
+{
+  "report_dir": "/path/to/your/vault/Videos",
+  "obsidian_wikilinks": true,
+  "default_template": "video-analysis",
+  "save_transcript": true,
+  "save_notable_frames": true,
+  "work_cache_dir": "~/.cache/watch"
+}
+```
+
+## Windows notes
+
+On Windows:
+- Use `python` instead of `python3` — the `python3` command maps to the Microsoft Store stub.
+- `yt-dlp` installed via `pip install --user yt-dlp` lands in `%APPDATA%\Python\PythonXY\Scripts`, which is often not on `PATH`. The plugin detects this and falls back to `python -m yt_dlp` automatically — no manual PATH fix needed.
+- If `$CLAUDE_SKILL_DIR` is unset, the skill locates its scripts directory via Glob search automatically.
 
 ## Limits
 

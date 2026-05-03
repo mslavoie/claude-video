@@ -57,15 +57,31 @@ def _pick_video(out_dir: Path) -> Path | None:
     return None
 
 
-def download_url(url: str, out_dir: Path) -> dict:
-    if shutil.which("yt-dlp") is None:
-        raise SystemExit("yt-dlp is not installed. Install with: brew install yt-dlp")
+def _yt_dlp_base() -> list[str]:
+    """Return the yt-dlp invocation prefix — binary preferred, module fallback."""
+    if shutil.which("yt-dlp"):
+        return ["yt-dlp"]
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "yt_dlp", "--version"],
+            capture_output=True, timeout=5,
+        )
+        if r.returncode == 0:
+            return [sys.executable, "-m", "yt_dlp"]
+    except Exception:
+        pass
+    raise SystemExit(
+        "yt-dlp is not installed or not on PATH. "
+        "Install with: brew install yt-dlp  or  pip install --user yt-dlp"
+    )
 
+
+def download_url(url: str, out_dir: Path) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     output_template = str(out_dir / "video.%(ext)s")
 
     cmd = [
-        "yt-dlp",
+        *_yt_dlp_base(),
         "-N", "8",
         "-f", "bv*[height<=720]+ba/b[height<=720]/bv+ba/b",
         "--merge-output-format", "mp4",
