@@ -1,5 +1,5 @@
 ---
-name: watch
+name: claude-video
 description: Watch a video (URL or local path). Downloads with yt-dlp, extracts auto-scaled frames with ffmpeg, pulls the transcript from captions (or Whisper API fallback), runs deep analytical synthesis on frames + transcript, and saves a structured Obsidian-ready markdown note to the vault with embedded notable frames.
 argument-hint: "<video-url-or-path> [question] [--template <name>] [--no-save]"
 allowed-tools: Bash, Read, Write, AskUserQuestion
