@@ -1,7 +1,8 @@
 ---
+name: watch
 description: Watch a video (URL or local path). Downloads with yt-dlp, extracts frames with ffmpeg, transcribes from captions or Whisper, runs deep analytical synthesis (hype detection, novelty scoring, competitive intelligence), and saves a structured Obsidian-ready note to your vault with embedded notable frames.
 argument-hint: <video-url-or-path> [question] [--template video-analysis] [--no-save] [--report-dir <path>]
-allowed-tools: [Bash, Read, Write, AskUserQuestion]
+allowed-tools: Bash, Read, Write, AskUserQuestion
 ---
 
 Invoke the `watch` skill (defined in SKILL.md) with the user's arguments: $ARGUMENTS
